@@ -2,6 +2,7 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+**/xcuserdata/
 .env
 .env.local
 node_modules
