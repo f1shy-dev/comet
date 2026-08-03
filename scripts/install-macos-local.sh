@@ -47,6 +47,21 @@ mkdir -p "$INSTALL_DIR" "$BACKUP_DIR"
 # another-name app is fine; the command is deliberately best-effort.
 osascript -e 'tell application id "dev.comet.native" to quit' >/dev/null 2>&1 || true
 
+# AppleScript returns as soon as the quit request is delivered. Wait for the
+# process to actually leave so its embedded engine has released the IPC port
+# before launchd starts the checkout-backed headless engine below.
+APP_EXECUTABLE="$INSTALLED_APP/Contents/MacOS/comet"
+for ((attempt = 0; attempt < 100; attempt++)); do
+  if ! pgrep -f "$APP_EXECUTABLE" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+if pgrep -f "$APP_EXECUTABLE" >/dev/null 2>&1; then
+  echo "Comet did not quit within 10 seconds; leaving the installed app untouched." >&2
+  exit 1
+fi
+
 if [[ -e "$INSTALLED_APP" ]]; then
   mv "$INSTALLED_APP" "$BACKUP_APP"
   echo "backed up: $BACKUP_APP"
