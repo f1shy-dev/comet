@@ -42,9 +42,13 @@ fn write_rows(path: &Path, rows: &[Value]) -> Vec<u8> {
 }
 
 fn write_fixture(root: &Path) -> (String, Vec<u8>) {
+    write_fixture_with_cwd(root, "/fixture/work")
+}
+
+fn write_fixture_with_cwd(root: &Path, cwd: &str) -> (String, Vec<u8>) {
     let key = "sessions/2026/01/01/rollout-fixture.jsonl".to_string();
     let rows = [
-        json!({"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"thread-fixture","session_id":"thread-fixture","cwd":"/fixture/work","source":"vscode","originator":"codex_cli_rs"}}),
+        json!({"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"thread-fixture","session_id":"thread-fixture","cwd":cwd,"source":"vscode","originator":"codex_cli_rs"}}),
         json!({"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"internal instructions"}]}}),
         json!({"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>internal</environment_context>"}]}}),
         json!({"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello Codex importer"}]}}),
@@ -65,6 +69,44 @@ fn write_fixture(root: &Path) -> (String, Vec<u8>) {
         ],
     );
     (key, bytes)
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .output()
+        .expect("git spawns");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn linked_worktree(root: &Path) -> (PathBuf, PathBuf) {
+    let repo = root.join("repo");
+    let worktree = root.join("linked-worktree");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "fixture\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "initial"]);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/import",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    (repo, worktree)
 }
 
 #[tokio::test]
@@ -154,6 +196,52 @@ async fn rpc_import_attaches_to_source_filters_internal_rows_and_is_idempotent()
             .unwrap()
             .len(),
         4
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn rpc_import_groups_linked_worktree_under_main_repo_space() {
+    let git_root = tempfile::tempdir().unwrap();
+    let (repo, worktree) = linked_worktree(git_root.path());
+    let codex_home = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+    let worktree_cwd = worktree.to_string_lossy().to_string();
+    let (source_key, _) = write_fixture_with_cwd(codex_home.path(), &worktree_cwd);
+    let core = assemble(data_dir.path(), codex_home.path());
+    let client = comet_rpc::memory_client(core.rpc_service());
+
+    let imported: CodexImportResult = serde_json::from_value(
+        client
+            .call(
+                methods::IMPORT_CODEX_THREAD,
+                json!({"sourceKey": source_key}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let chat = core
+        .workspace
+        .doc()
+        .chat(&imported.chat_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(chat.cwd.as_deref(), Some(worktree_cwd.as_str()));
+    assert_eq!(
+        chat.harness_session_cwd.as_deref(),
+        Some(worktree_cwd.as_str())
+    );
+    let space = core
+        .workspace
+        .doc()
+        .space(chat.space_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(space.path).unwrap(),
+        std::fs::canonicalize(repo).unwrap()
     );
     core.shutdown().await;
 }

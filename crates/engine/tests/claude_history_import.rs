@@ -29,13 +29,17 @@ fn assemble(data_dir: &Path, history_root: &Path) -> EngineCore {
 }
 
 fn write_fixture(root: &Path) -> (String, Vec<u8>) {
+    write_fixture_with_cwd(root, "/fixture/work")
+}
+
+fn write_fixture_with_cwd(root: &Path, cwd: &str) -> (String, Vec<u8>) {
     let project = root.join("-fixture-project");
     std::fs::create_dir_all(&project).unwrap();
     let key = "-fixture-project/session-fixture.jsonl".to_string();
     let rows = [
-        json!({"type":"user","uuid":"u1","parentUuid":null,"sessionId":"session-fixture","cwd":"/fixture/work","timestamp":"2026-01-01T00:00:00Z","message":{"content":"hello importer"}}),
-        json!({"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"session-fixture","cwd":"/fixture/work","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"text","text":"hello back"}]}}),
-        json!({"type":"system","subtype":"turn_duration","uuid":"leaf","parentUuid":"a1","sessionId":"session-fixture","cwd":"/fixture/work","timestamp":"2026-01-01T00:00:02Z"}),
+        json!({"type":"user","uuid":"u1","parentUuid":null,"sessionId":"session-fixture","cwd":cwd,"timestamp":"2026-01-01T00:00:00Z","message":{"content":"hello importer"}}),
+        json!({"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"session-fixture","cwd":cwd,"timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"text","text":"hello back"}]}}),
+        json!({"type":"system","subtype":"turn_duration","uuid":"leaf","parentUuid":"a1","sessionId":"session-fixture","cwd":cwd,"timestamp":"2026-01-01T00:00:02Z"}),
         json!({"type":"ai-title","sessionId":"session-fixture","aiTitle":"Fixture import"}),
         json!({"type":"last-prompt","sessionId":"session-fixture","leafUuid":"leaf","lastPrompt":"hello importer"}),
     ];
@@ -48,6 +52,44 @@ fn write_fixture(root: &Path) -> (String, Vec<u8>) {
         .into_bytes();
     std::fs::write(root.join(&key), &bytes).unwrap();
     (key, bytes)
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .output()
+        .expect("git spawns");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn linked_worktree(root: &Path) -> (PathBuf, PathBuf) {
+    let repo = root.join("repo");
+    let worktree = root.join("linked-worktree");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "fixture\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "initial"]);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/import",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    (repo, worktree)
 }
 
 #[tokio::test]
@@ -123,6 +165,102 @@ async fn rpc_import_attaches_to_source_and_is_idempotent() {
         std::fs::read(history_root.path().join(&source_key)).unwrap(),
         source_before
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn rpc_import_groups_linked_worktree_under_main_repo_space() {
+    let git_root = tempfile::tempdir().unwrap();
+    let (repo, worktree) = linked_worktree(git_root.path());
+    let history_root = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+    let worktree_cwd = worktree.to_string_lossy().to_string();
+    let (source_key, _) = write_fixture_with_cwd(history_root.path(), &worktree_cwd);
+    let core = assemble(data_dir.path(), history_root.path());
+    let client = comet_rpc::memory_client(core.rpc_service());
+
+    let imported: ClaudeImportResult = serde_json::from_value(
+        client
+            .call(
+                methods::IMPORT_CLAUDE_THREAD,
+                json!({"sourceKey": source_key}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let chat = core
+        .workspace
+        .doc()
+        .chat(&imported.chat_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(chat.cwd.as_deref(), Some(worktree_cwd.as_str()));
+    assert_eq!(
+        chat.harness_session_cwd.as_deref(),
+        Some(worktree_cwd.as_str())
+    );
+    let space = core
+        .workspace
+        .doc()
+        .space(chat.space_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(space.path).unwrap(),
+        std::fs::canonicalize(repo).unwrap()
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn retry_does_not_regroup_an_existing_import() {
+    let git_root = tempfile::tempdir().unwrap();
+    let future_worktree = git_root.path().join("linked-worktree");
+    let worktree_cwd = future_worktree.to_string_lossy().to_string();
+    let history_root = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+    let (source_key, _) = write_fixture_with_cwd(history_root.path(), &worktree_cwd);
+    let core = assemble(data_dir.path(), history_root.path());
+    let client = comet_rpc::memory_client(core.rpc_service());
+
+    // First import predates the worktree, reproducing an existing legacy
+    // import whose space is the exact source cwd.
+    let first: ClaudeImportResult = serde_json::from_value(
+        client
+            .call(
+                methods::IMPORT_CLAUDE_THREAD,
+                json!({"sourceKey": source_key}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let first_space = core
+        .workspace
+        .doc()
+        .space(&first.space_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_space.path, worktree_cwd);
+
+    // Once that path becomes a real linked worktree, a retry can resolve its
+    // main repo—but must still preserve the already-imported chat grouping.
+    let _ = linked_worktree(git_root.path());
+    let retry: ClaudeImportResult = serde_json::from_value(
+        client
+            .call(
+                methods::IMPORT_CLAUDE_THREAD,
+                json!({"sourceKey": source_key}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retry.chat_id, first.chat_id);
+    assert_eq!(retry.space_id, first.space_id);
+    assert_eq!(core.workspace.doc().read_spaces().unwrap().len(), 1);
     core.shutdown().await;
 }
 

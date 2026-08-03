@@ -203,6 +203,39 @@ impl Repos {
         Ok(PathBuf::from(git_dir).join("HEAD"))
     }
 
+    /// Resolve the main working checkout that owns `path`.
+    ///
+    /// Imported harness threads often run inside linked worktrees created by
+    /// another tool. Their chat must keep that exact worktree as its cwd, but
+    /// the sidebar space should be the shared repository's main checkout so
+    /// sibling worktrees group under one project. Non-git/unavailable paths
+    /// return `None`; import callers preserve the original cwd in that case.
+    pub async fn repository_space_root(&self, path: &Path) -> Option<PathBuf> {
+        let output = self
+            .git(&["worktree", "list", "--porcelain"], Some(path))
+            .await
+            .ok()?;
+
+        let mut stanzas = output.split("\n\n");
+        let first = stanzas.next()?;
+        let first_path = first
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree "))?;
+
+        // A repository with a bare primary checkout has no usable project
+        // folder. Keep such imports grouped at their actual linked checkout.
+        let root = if first.lines().any(|line| line == "bare") {
+            self.git(&["rev-parse", "--show-toplevel"], Some(path))
+                .await
+                .ok()?
+        } else {
+            first_path.to_string()
+        };
+
+        let root = PathBuf::from(root);
+        Some(std::fs::canonicalize(&root).unwrap_or(root))
+    }
+
     /// Canonical identity shared by every chat operating in this exact worktree:
     /// `sha256(deviceId ‖ NUL ‖ canonical git dir)`.
     pub async fn checkout_identity(&self, path: &Path) -> Result<CheckoutIdentity, EngineError> {

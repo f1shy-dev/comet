@@ -474,31 +474,55 @@ impl EngineRpc {
         source_key: &str,
         session_id: &str,
         title: &str,
+        space_path: &str,
         cwd: &str,
         entries: &[SessionMessageEntry],
         first_message_at: Option<i64>,
         last_message_at: Option<i64>,
     ) -> Result<(String, String), RpcError> {
-        let space_id = self
-            .workspace
-            .read_spaces()
-            .map_err(|error| RpcError::Failed(error.to_string()))?
-            .into_iter()
-            .find(|space| space.device_id == self.doc_host.device_id() && space.path == cwd)
-            .map(|space| space.id)
-            .unwrap_or_else(|| {
-                stable_import_id(
-                    &format!("{provider}-space"),
-                    &format!("{}\0{cwd}", self.doc_host.device_id()),
-                )
-            });
-        self.workspace
-            .create_space(&space_id, self.doc_host.device_id(), cwd, None, false)
-            .map_err(|error| RpcError::Failed(error.to_string()))?;
         let chat_id = stable_import_id(
             &format!("{provider}-import"),
             &format!("{}\0{source_key}", self.doc_host.device_id()),
         );
+        // An already-imported chat keeps its original space. In particular,
+        // upgrading this resolver must not silently regroup existing imports
+        // when an idempotent retry refreshes their transcript.
+        let existing_space_id = self
+            .workspace
+            .doc()
+            .chat(&chat_id)
+            .map_err(|error| RpcError::Failed(error.to_string()))?
+            .and_then(|chat| chat.space_id);
+        let space_id = match existing_space_id {
+            Some(space_id) => space_id,
+            None => {
+                let space_id = self
+                    .workspace
+                    .read_spaces()
+                    .map_err(|error| RpcError::Failed(error.to_string()))?
+                    .into_iter()
+                    .find(|space| {
+                        space.device_id == self.doc_host.device_id() && space.path == space_path
+                    })
+                    .map(|space| space.id)
+                    .unwrap_or_else(|| {
+                        stable_import_id(
+                            &format!("{provider}-space"),
+                            &format!("{}\0{space_path}", self.doc_host.device_id()),
+                        )
+                    });
+                self.workspace
+                    .create_space(
+                        &space_id,
+                        self.doc_host.device_id(),
+                        space_path,
+                        None,
+                        false,
+                    )
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                space_id
+            }
+        };
         self.workspace
             .create_chat(
                 &chat_id,
@@ -1233,12 +1257,19 @@ impl RpcService for EngineRpc {
                         })?
                         .map_err(|error| RpcError::Failed(error.to_string()))?;
 
+                let space_path = self
+                    .repos
+                    .repository_space_root(std::path::Path::new(&parsed.cwd))
+                    .await
+                    .unwrap_or_else(|| std::path::PathBuf::from(&parsed.cwd));
+
                 let (chat_id, space_id) = self.persist_history_import(
                     "claude",
                     HarnessId::ClaudeCode,
                     &parsed.source_key,
                     &parsed.session_id,
                     &parsed.title,
+                    &space_path.to_string_lossy(),
                     &parsed.cwd,
                     &parsed.entries,
                     parsed.first_message_at,
@@ -1284,12 +1315,19 @@ impl RpcService for EngineRpc {
                         })?
                         .map_err(|error| RpcError::Failed(error.to_string()))?;
 
+                let space_path = self
+                    .repos
+                    .repository_space_root(std::path::Path::new(&parsed.cwd))
+                    .await
+                    .unwrap_or_else(|| std::path::PathBuf::from(&parsed.cwd));
+
                 let (chat_id, space_id) = self.persist_history_import(
                     "codex",
                     HarnessId::Codex,
                     &parsed.source_key,
                     &parsed.session_id,
                     &parsed.title,
+                    &space_path.to_string_lossy(),
                     &parsed.cwd,
                     &parsed.entries,
                     parsed.first_message_at,
