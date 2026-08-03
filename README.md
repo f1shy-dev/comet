@@ -26,7 +26,18 @@ comet update      # update to the latest release
 comet daemon start|stop|restart|status
 ```
 
-On macOS: build `comet` from source, then `comet daemon install` (launchd).
+On macOS, this checkout has a one-command daily build:
+
+```bash
+scripts/install-macos-local.sh
+```
+
+It installs `/Applications/Zeron.app`, registers the background IPC engine
+against this checkout's `target/release/comet headless`, and opens the app.
+Re-run it after pulling or rebasing to rebuild both sides. Use `--no-daemon` or
+`--no-open` when you only want part of that flow. To build a launchable bundle
+without installing it, run `scripts/build-macos-app.sh`; the result is
+`target/package/Zeron.app`.
 
 ---
 
