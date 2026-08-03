@@ -59,6 +59,22 @@ use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
 actions!(shell, [ToggleSidebar, ToggleChanges, AddSpacePalette]);
 
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = shell, no_json)]
+struct FocusSidebarSession {
+    /// Zero-based row in the global Sessions sidebar.
+    slot: usize,
+}
+
+fn sidebar_session_key_bindings() -> Vec<KeyBinding> {
+    (0..9)
+        .map(|slot| {
+            let combo = platform_combo(&format!("mod-{}", slot + 1));
+            KeyBinding::new(&combo, FocusSidebarSession { slot }, None)
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -140,6 +156,10 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // bar); pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
     ]);
+    // Fixed: ⌘1…⌘9 select the corresponding row in the global Sessions
+    // sidebar's current recency order. These deliberately do not target the
+    // per-space tab strip and do not appear in shortcut settings.
+    cx.bind_keys(sidebar_session_key_bindings());
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -1268,6 +1288,26 @@ impl Shell {
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    fn focus_sidebar_session(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let target = self
+            .state
+            .read(cx)
+            .overview_chats(Utc::now())
+            .get(slot)
+            .map(|(_, chat)| chat.id.clone());
+        let Some(chat_id) = target else {
+            return;
+        };
+
+        // This is a direct navigation, so record it before applying it. The
+        // state observer will see the same entry after select_chat and dedup
+        // it; pre-recording also handles Settings -> already-selected chat,
+        // where the selected-chat state itself does not change.
+        let entry = NavEntry::Chat(chat_id);
+        self.nav.push(entry.clone());
+        self.apply_nav(entry, cx);
     }
 
     /// Lazily create the entity for a settings section and return it renderable.
@@ -4276,6 +4316,9 @@ impl Render for Shell {
                     this.toggle_right_pane(cx)
                 }
             }))
+            .on_action(cx.listener(|this, action: &FocusSidebarSession, _, cx| {
+                this.focus_sidebar_session(action.slot, cx);
+            }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
                     this.add_space = None;
@@ -4493,6 +4536,27 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_session_shortcuts_cover_literal_slots_one_through_nine() {
+        let bindings = sidebar_session_key_bindings();
+        assert_eq!(bindings.len(), 9);
+
+        for (slot, binding) in bindings.iter().enumerate() {
+            let expected = Keystroke::parse(&platform_combo(&format!("mod-{}", slot + 1)))
+                .expect("fixed session shortcut parses");
+            let actual: Vec<Keystroke> = binding
+                .keystrokes()
+                .iter()
+                .map(|keystroke| keystroke.inner().clone())
+                .collect();
+            assert_eq!(actual, [expected]);
+            assert!(
+                binding.action().partial_eq(&FocusSidebarSession { slot }),
+                "shortcut payload targets zero-based sidebar slot {slot}"
+            );
+        }
+    }
 
     #[test]
     fn titlebar_cluster_matches_comet_window_controls() {
