@@ -35,6 +35,7 @@ use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::AppearancePage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::archived::ArchivedPage;
+use crate::settings::claude_imports::{ClaudeImportsEvent, ClaudeImportsPage};
 use crate::settings::devices::DevicesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
@@ -150,17 +151,19 @@ pub enum SettingsSection {
     Agents,
     Appearance,
     Notifications,
+    ClaudeImports,
     Shortcuts,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 7] = [
+    pub const ALL: [SettingsSection; 8] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
+        SettingsSection::ClaudeImports,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
     ];
@@ -174,6 +177,7 @@ impl SettingsSection {
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
+            SettingsSection::ClaudeImports => "Claude history",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -465,6 +469,8 @@ pub struct Shell {
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
+    claude_imports_page: Option<Entity<ClaudeImportsPage>>,
+    claude_imports_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
     chat_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_dialog: Option<RenameChatDialog>,
@@ -641,6 +647,9 @@ impl Shell {
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
+            Some("settings/claude-history") | Some("settings/imports") => {
+                Route::Settings(SettingsSection::ClaudeImports)
+            }
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
@@ -693,6 +702,8 @@ impl Shell {
             shortcuts_sub: None,
             notifications_sub: None,
             chat_menu: popover::Popup::default(),
+            claude_imports_page: None,
+            claude_imports_sub: None,
             rename_dialog: None,
             delete_confirm: None,
             space_menu: popover::Popup::default(),
@@ -1325,6 +1336,29 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::ClaudeImports => {
+                if self.claude_imports_page.is_none() {
+                    let state = self.state.clone();
+                    let page = cx.new(|cx| ClaudeImportsPage::new(state, cx));
+                    self.claude_imports_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &ClaudeImportsEvent, cx| {
+                            let ClaudeImportsEvent::OpenChat(chat_id) = event;
+                            let chat_id = chat_id.clone();
+                            this.route = Route::Chat;
+                            this.nav.push(NavEntry::Chat(chat_id.clone()));
+                            this.state
+                                .update(cx, |state, cx| state.select_chat(Some(chat_id), cx));
+                            cx.notify();
+                        },
+                    ));
+                    self.claude_imports_page = Some(page);
+                }
+                match &self.claude_imports_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::Shortcuts => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
@@ -1923,6 +1957,7 @@ impl Shell {
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Notifications => icons::BELL,
+            SettingsSection::ClaudeImports => icons::DOCUMENT_ADD,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
+pub mod claude_imports;
 pub mod composer;
 pub mod devices;
 pub mod harnesses;

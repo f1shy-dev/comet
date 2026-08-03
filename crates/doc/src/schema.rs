@@ -235,6 +235,37 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Append complete entries that are not already present, then commit once.
+    ///
+    /// History import can add thousands of immutable rows. Committing each row
+    /// separately needlessly wakes persistence/sync subscribers thousands of
+    /// times; this keeps retry idempotence while making one CRDT transaction.
+    pub fn push_messages_unique(&self, entries: &[SessionMessageEntry]) -> Result<usize, DocError> {
+        let mut known: std::collections::HashSet<String> = self
+            .read_entries()?
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        let messages = self.doc.get_list("messages");
+        let mut inserted = 0usize;
+        for entry in entries {
+            if !known.insert(entry.id.clone()) {
+                continue;
+            }
+            let map = messages.push_container(LoroMap::new())?;
+            write_entry_scalar_fields(&map, entry)?;
+            let parts = map.insert_container("parts", LoroList::new())?;
+            for part in &entry.parts {
+                push_part(&parts, part)?;
+            }
+            inserted += 1;
+        }
+        if inserted > 0 {
+            self.doc.commit();
+        }
+        Ok(inserted)
+    }
+
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
     ///
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state
@@ -991,6 +1022,15 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn batch_push_is_retry_safe() {
+        let doc = SessionDoc::init("chat-batch").unwrap();
+        let entries = [user_entry("m1", "one"), user_entry("m2", "two")];
+        assert_eq!(doc.push_messages_unique(&entries).unwrap(), 2);
+        assert_eq!(doc.push_messages_unique(&entries).unwrap(), 0);
+        assert_eq!(doc.read_entries().unwrap(), entries);
     }
 
     #[test]

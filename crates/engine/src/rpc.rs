@@ -50,16 +50,18 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::watch;
 
 use comet_doc::{MessagePart, SessionCommandPayload};
-use comet_proto::{ChatConfig, HarnessId, ToolCall};
+use comet_proto::{ChatConfig, ClaudeImportResult, HarnessId, SandboxLevel, ToolCall};
 use comet_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
+use crate::claude_history::{ClaudeHistory, DEFAULT_LIST_LIMIT};
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
@@ -271,6 +273,19 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListClaudeThreadsParams {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportClaudeThreadParams {
+    source_key: String,
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -377,6 +392,7 @@ pub struct EngineRpc {
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
     agent_accounts: AgentAccounts,
+    claude_history: ClaudeHistory,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<comet_update::Updater>,
@@ -394,6 +410,7 @@ impl EngineRpc {
         diff_sync: CheckoutDiffSync,
         uploads: Uploads,
         agent_accounts: AgentAccounts,
+        claude_history: ClaudeHistory,
     ) -> Self {
         Self {
             sessions,
@@ -405,6 +422,7 @@ impl EngineRpc {
             diff_sync,
             uploads,
             agent_accounts,
+            claude_history,
             auth: None,
             links: None,
             updater: None,
@@ -731,6 +749,15 @@ impl EngineRpc {
     }
 }
 
+fn stable_import_id(prefix: &str, seed: &str) -> String {
+    let digest = Sha256::digest(seed.as_bytes());
+    let suffix = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{prefix}-{suffix}")
+}
+
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
@@ -778,6 +805,9 @@ fn forwardable(method: &str) -> bool {
             | methods::UPLOAD_CHUNK
             | methods::UPLOAD_COMMIT
             | methods::READ_ATTACHMENT_CHUNK
+            // Claude JSONLs live on the selected device.
+            | methods::LIST_CLAUDE_THREADS
+            | methods::IMPORT_CLAUDE_THREAD
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
             | methods::APPLY_UPDATE
@@ -1088,6 +1118,109 @@ impl RpcService for EngineRpc {
                 let p: MutateParams = parse_params(params)?;
                 self.mutate(p)?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::LIST_CLAUDE_THREADS => {
+                let p: ListClaudeThreadsParams = parse_params(params)?;
+                let history = self.claude_history.clone();
+                let listing = tokio::task::spawn_blocking(move || {
+                    history.list(p.limit.unwrap_or(DEFAULT_LIST_LIMIT))
+                })
+                .await
+                .map_err(|error| RpcError::Failed(format!("Claude history scan failed: {error}")))?
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&listing)
+            }
+            methods::IMPORT_CLAUDE_THREAD => {
+                let p: ImportClaudeThreadParams = parse_params(params)?;
+                let history = self.claude_history.clone();
+                let device_id = self.doc_host.device_id().to_string();
+                let parsed =
+                    tokio::task::spawn_blocking(move || history.parse(&p.source_key, &device_id))
+                        .await
+                        .map_err(|error| {
+                            RpcError::Failed(format!("Claude history import failed: {error}"))
+                        })?
+                        .map_err(|error| RpcError::Failed(error.to_string()))?;
+
+                let space_id = self
+                    .workspace
+                    .read_spaces()
+                    .map_err(|error| RpcError::Failed(error.to_string()))?
+                    .into_iter()
+                    .find(|space| {
+                        space.device_id == self.doc_host.device_id() && space.path == parsed.cwd
+                    })
+                    .map(|space| space.id)
+                    .unwrap_or_else(|| {
+                        stable_import_id(
+                            "claude-space",
+                            &format!("{}\0{}", self.doc_host.device_id(), parsed.cwd),
+                        )
+                    });
+                self.workspace
+                    .create_space(
+                        &space_id,
+                        self.doc_host.device_id(),
+                        &parsed.cwd,
+                        None,
+                        false,
+                    )
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                let chat_id = stable_import_id(
+                    "claude-import",
+                    &format!("{}\0{}", self.doc_host.device_id(), parsed.source_key),
+                );
+                self.workspace
+                    .create_chat(
+                        &chat_id,
+                        Some(&space_id),
+                        None,
+                        Some(ChatConfig {
+                            harness: HarnessId::ClaudeCode,
+                            model: None,
+                            reasoning: None,
+                            model_options: serde_json::Map::new(),
+                            sandbox: SandboxLevel::WorkspaceWrite,
+                        }),
+                        Some(parsed.cwd.clone()),
+                    )
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                let handle = self
+                    .doc_host
+                    .open(&chat_id)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                handle
+                    .doc()
+                    .push_messages_unique(&parsed.entries)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                self.workspace
+                    .rename_chat(&chat_id, &parsed.title)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                self.workspace
+                    .set_chat_activity(&chat_id, parsed.last_message_at, parsed.first_message_at)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                // An import is the same Claude thread in a native Comet view:
+                // preserve resume continuity from the first subsequent turn.
+                self.workspace
+                    .set_chat_harness_session(&chat_id, &parsed.session_id, &parsed.cwd);
+                self.doc_host.flush_all();
+                self.workspace.flush();
+
+                RpcReply::value(&ClaudeImportResult {
+                    chat_id,
+                    space_id,
+                    source_key: parsed.source_key,
+                    source_sha256: parsed.source_sha256,
+                    source_bytes: parsed.source_bytes,
+                    session_id: parsed.session_id,
+                    leaf_uuid: parsed.leaf_uuid,
+                    title: parsed.title,
+                    cwd: parsed.cwd,
+                    imported_messages: parsed.logical_messages,
+                    imported_parts: parsed.part_count,
+                    branch_records: parsed.branch_records,
+                    invalid_lines: parsed.invalid_lines,
+                })
             }
             methods::WATCH_CHECKOUT_DIFFS => {
                 Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
