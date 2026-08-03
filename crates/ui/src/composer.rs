@@ -1047,6 +1047,9 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentMentionSpan {
     pub range: Range<usize>,
+    /// Exact raw-Markdown link range before transcript projection. Clipboard
+    /// selection maps the display-only chip back to this whole source slice.
+    pub source_range: Range<usize>,
     /// Full workspace-relative path (labels can be shortened to basenames).
     pub path: SharedString,
     pub is_dir: bool,
@@ -1070,6 +1073,7 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
         .iter()
         .map(|(link, display)| SentMentionSpan {
             range: display.clone(),
+            source_range: link.range.clone(),
             path: SharedString::from(format!(
                 "{}{}",
                 link.path,

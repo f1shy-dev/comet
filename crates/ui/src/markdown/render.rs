@@ -79,6 +79,9 @@ pub struct RenderOptions {
     /// Code-block copy-button plumbing (round 9): `None` renders no button
     /// (previews outside the transcript).
     pub copy: Option<CopyUi>,
+    /// Exact original source of this top-level block, used when a visual text
+    /// selection is copied back to Markdown.
+    pub copy_source: Option<super::selection::BlockSource>,
 }
 
 /// Copy-button wiring for one row's code blocks: the handler writes the code
@@ -99,6 +102,7 @@ impl RenderOptions {
             cache: None,
             now: Instant::now(),
             copy: None,
+            copy_source: None,
         }
     }
 }
@@ -495,6 +499,7 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    pub copy_runs: Vec<super::selection::InlineCopyRun>,
 }
 
 /// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
@@ -532,12 +537,25 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut copy_runs: Vec<super::selection::InlineCopyRun> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
         }
         let start = text.len();
         text.push_str(&run.text);
+        copy_runs.push(super::selection::InlineCopyRun {
+            range: start..text.len(),
+            bold: run.style.bold,
+            italic: run.style.italic,
+            code: run.style.code,
+            strikethrough: run.style.strikethrough,
+            link: run
+                .style
+                .link
+                .clone()
+                .filter(|url| url != super::mend::PENDING_LINK_URL),
+        });
         let mut f = if run.style.code {
             font(theme.font_mono.clone())
         } else {
@@ -609,6 +627,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         runs: out,
         links,
         code_ranges,
+        copy_runs,
     }
 }
 
@@ -677,6 +696,13 @@ fn flat_text_element(
     let sel_key: std::sync::Arc<str> = format!("{}:{ix}", opts.row_key).into();
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat.text.clone();
+    let copy = opts
+        .copy_source
+        .clone()
+        .map(|block| super::selection::CopyMeta {
+            block,
+            partial: super::selection::PartialCopy::Inline(flat.copy_runs.clone()),
+        });
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
@@ -709,14 +735,13 @@ fn flat_text_element(
             // Register this element into the frame's document-ordered
             // registry (paint order IS document order), then the frame's
             // mouse listeners.
-            REGISTRY.with(|r| {
-                r.borrow_mut().push(RegEntry {
-                    key: sel_key.clone(),
-                    text: flat_text.clone(),
-                    layout: layout.clone(),
-                })
-            });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout);
+            register_selectable_text(
+                window,
+                sel_key.clone(),
+                flat_text.clone(),
+                layout.clone(),
+                copy.clone(),
+            );
         },
     )
     .absolute()
@@ -729,50 +754,15 @@ fn flat_text_element(
 }
 
 /// Selection tint: the accent hue under the glyphs, dark-panel strength.
-fn selection_wash(theme: &Theme) -> Hsla {
+pub(crate) fn selection_wash(theme: &Theme) -> Hsla {
     theme.accent.opacity(0.35) // indigo-400
-}
-
-/// Selection support for a plain (non-markdown) text element — the user
-/// bubble. Paints the selection wash under the glyphs, registers the element
-/// into the frame's document-ordered registry (so drags span into adjacent
-/// markdown rows and Cmd+C joins in order), and re-registers the mouse
-/// listeners. Call from a paint-phase canvas that sits UNDER the text.
-pub(crate) fn paint_text_selection(
-    window: &mut Window,
-    key: &std::sync::Arc<str>,
-    text: &SharedString,
-    layout: &gpui::TextLayout,
-    theme: &Theme,
-) {
-    if let Some(range) = super::selection::wash_range(key) {
-        for rect in range_rects(layout, &range, 0.0, 0.0) {
-            window.paint_quad(quad(
-                rect,
-                px(0.0),
-                selection_wash(theme),
-                px(0.0),
-                gpui::transparent_black(),
-                BorderStyle::default(),
-            ));
-        }
-    }
-    REGISTRY.with(|r| {
-        r.borrow_mut().push(RegEntry {
-            key: key.clone(),
-            text: text.clone(),
-            layout: layout.clone(),
-        })
-    });
-    register_selection_listeners(window, key, text, layout);
 }
 
 /// One painted text element, registered per frame in document order — the
 /// continuity model that lets a drag span paragraphs/list items (Zed gets
 /// this for free from its single-element markdown; our tree rebuilds it).
 struct RegEntry {
-    key: std::sync::Arc<str>,
-    text: SharedString,
+    element: super::selection::Element,
     layout: gpui::TextLayout,
 }
 
@@ -829,16 +819,48 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
 fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> bool {
     REGISTRY.with(|r| {
         let reg = r.borrow();
-        let Some(anchor_ei) = reg.iter().position(|e| e.key.as_ref() == anchor_key) else {
+        let Some(anchor_ei) = reg.iter().position(|e| e.element.key == anchor_key) else {
             return false; // anchor scrolled out of the frame — keep spans
         };
-        let elements: Vec<(&str, &str)> = reg
-            .iter()
-            .map(|e| (e.key.as_ref(), e.text.as_ref()))
-            .collect();
+        let elements: Vec<super::selection::Element> =
+            reg.iter().map(|e| e.element.clone()).collect();
         let spans = super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head);
         super::selection::update_spans(spans)
     })
+}
+
+fn resolved_click_spans(key: &str, range: Range<usize>) -> Vec<super::selection::Span> {
+    REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let Some(ix) = registry.iter().position(|entry| entry.element.key == key) else {
+            return Vec::new();
+        };
+        let elements: Vec<_> = registry.iter().map(|entry| entry.element.clone()).collect();
+        super::selection::resolve_spans(&elements, (ix, range.start), (ix, range.end))
+    })
+}
+
+/// Register one already-shaped text element in the transcript-wide selection
+/// model. User bubbles use the same path as assistant Markdown so a drag can
+/// cross either kind of message without special cases.
+pub(crate) fn register_selectable_text(
+    window: &mut Window,
+    key: std::sync::Arc<str>,
+    text: SharedString,
+    layout: gpui::TextLayout,
+    copy: Option<super::selection::CopyMeta>,
+) {
+    REGISTRY.with(|registry| {
+        registry.borrow_mut().push(RegEntry {
+            element: super::selection::Element {
+                key: key.to_string(),
+                text: text.to_string(),
+                copy,
+            },
+            layout: layout.clone(),
+        });
+    });
+    register_selection_listeners(window, &key, &text, &layout);
 }
 
 /// Register this frame's window-level mouse listeners for one text element's
@@ -864,10 +886,12 @@ fn register_selection_listeners(
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
-                        super::selection::begin_with_span(&key, &text, range);
+                        let spans = resolved_click_spans(&key, range.clone());
+                        super::selection::begin_with_spans(&key, range.start, spans);
                     }
                     n if n >= 3 => {
-                        super::selection::begin_with_span(&key, &text, 0..text.len());
+                        let spans = resolved_click_spans(&key, 0..text.len());
+                        super::selection::begin_with_spans(&key, 0, spans);
                     }
                     _ => super::selection::begin(&key, ix),
                 }
@@ -992,6 +1016,63 @@ fn text_element(
         .text_size(px(size))
         .line_height(px(line_height))
         .child(inner)
+        .into_any_element()
+}
+
+fn selectable_code_line(
+    line: SharedString,
+    runs: Vec<TextRun>,
+    block_ix: usize,
+    line_ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+) -> AnyElement {
+    let styled = StyledText::new(line.clone()).with_runs(runs);
+    if line.is_empty() {
+        return styled.into_any_element();
+    }
+    let layout = styled.layout().clone();
+    let key: std::sync::Arc<str> = format!("{}:{block_ix}:code:{line_ix}", opts.row_key).into();
+    let copy = opts
+        .copy_source
+        .clone()
+        .map(|block| super::selection::CopyMeta {
+            block,
+            partial: super::selection::PartialCopy::Plain,
+        });
+    let wash = selection_wash(theme);
+    let underlay = canvas(|_, _, _| (), {
+        let key = key.clone();
+        let line = line.clone();
+        let layout = layout.clone();
+        move |_, _, window, _| {
+            if let Some(range) = super::selection::wash_range(&key) {
+                for rect in range_rects(&layout, &range, 0.0, 0.0) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(0.0),
+                        wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+            register_selectable_text(
+                window,
+                key.clone(),
+                line.clone(),
+                layout.clone(),
+                copy.clone(),
+            );
+        }
+    })
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
         .into_any_element()
 }
 
@@ -1142,7 +1223,14 @@ fn render_code_block(
                         div()
                             .h(px(CODE_LINE_HEIGHT))
                             .flex_none()
-                            .child(StyledText::new(line.clone()).with_runs(runs)),
+                            .child(selectable_code_line(
+                                line.clone(),
+                                runs,
+                                ix,
+                                li,
+                                opts,
+                                theme,
+                            )),
                     )
                 })),
         )

@@ -405,6 +405,9 @@ pub enum RowKind {
         /// prompt carries file mentions this is the *projected* display text —
         /// chip labels in place of the raw Markdown links.
         text: SharedString,
+        /// Prompt source after attachment transport metadata is stripped, but
+        /// before file-mention chips are projected for display.
+        source: SharedString,
         /// File-mention chips over `text`, in display-byte terms. Computed
         /// once per entry change in [`rows_for_entry`] (rows are cached by
         /// fingerprint), never per frame. Empty for ordinary prompts.
@@ -419,6 +422,8 @@ pub enum RowKind {
     Markdown {
         tree: Arc<BlockTree>,
         block_ix: usize,
+        source: Arc<str>,
+        part_key: SharedString,
     },
     /// One top-level block of a STREAMING message. Split per block like
     /// completed rows (only the tail blocks' versions change per commit, so
@@ -427,6 +432,8 @@ pub enum RowKind {
     LiveMarkdown {
         tree: Arc<BlockTree>,
         block_ix: usize,
+        source: Arc<str>,
+        part_key: SharedString,
     },
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
@@ -561,6 +568,7 @@ pub fn rows_for_entry(
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
+        let source: SharedString = parsed.text.clone().into();
         // File mentions render as chips here too, not just in the composer.
         // The projection is pure over the text, so the raw-length row version
         // below stays a valid cache/diff key.
@@ -574,6 +582,7 @@ pub fn rows_for_entry(
             turn_start: true,
             kind: RowKind::User {
                 text: text.into(),
+                source,
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(parsed.attachments),
                 pending,
@@ -652,6 +661,8 @@ pub fn rows_for_entry(
                         }
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
+                        let source: Arc<str> = Arc::from(text.as_str());
+                        let part_key: SharedString = key.clone().into();
                         // Live and completed parts split identically — one row
                         // per top-level block, same ids, so the live→complete
                         // handoff never changes row identity. The version is a
@@ -677,11 +688,15 @@ pub fn rows_for_entry(
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
                                         block_ix,
+                                        source: source.clone(),
+                                        part_key: part_key.clone(),
                                     }
                                 } else {
                                     RowKind::Markdown {
                                         tree: tree.clone(),
                                         block_ix,
+                                        source: source.clone(),
+                                        part_key: part_key.clone(),
                                     }
                                 },
                             });
@@ -2329,12 +2344,14 @@ impl Transcript {
         let inner: AnyElement = match &row.kind {
             RowKind::User {
                 text,
+                source,
                 mentions,
                 attachments,
                 pending,
             } => {
                 let attachments = attachments.clone();
                 let text = text.clone();
+                let source = source.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
@@ -2364,24 +2381,35 @@ impl Transcript {
                                 .line_height(px(22.0))
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
-                                .child(user_bubble_text(&row.id, text, mentions, &theme)),
+                                .child(user_message_text(&row.id, text, source, mentions, &theme)),
                         ),
                     );
                 }
                 column.into_any_element()
             }
-            RowKind::Markdown { tree, block_ix } => {
+            RowKind::Markdown {
+                tree,
+                block_ix,
+                source,
+                part_key,
+            } => {
+                let Some(top) = tree.blocks.get(*block_ix) else {
+                    return gpui::Empty.into_any_element();
+                };
                 let opts = RenderOptions {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    copy_source: Some(crate::markdown::selection::BlockSource {
+                        block_key: row.id.to_string(),
+                        part_key: part_key.to_string(),
+                        source: source.clone(),
+                        range: top.range.start.min(source.len())..top.range.end.min(source.len()),
+                    }),
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
-                };
                 render::render_block(
                     &top.block,
                     *block_ix,
@@ -2395,7 +2423,12 @@ impl Transcript {
                         .map(|v| v.as_slice()),
                 )
             }
-            RowKind::LiveMarkdown { tree, block_ix } => {
+            RowKind::LiveMarkdown {
+                tree,
+                block_ix,
+                source,
+                part_key,
+            } => {
                 // Per-appended-chunk fade veil (opacity only — layout commits
                 // instantly). Reduced motion renders with no veil at all.
                 // Baseline rows (text already streamed when the transcript
@@ -2413,17 +2446,23 @@ impl Transcript {
                         })
                         .clone()
                 });
+                let Some(top) = tree.blocks.get(*block_ix) else {
+                    return gpui::Empty.into_any_element();
+                };
                 let opts = RenderOptions {
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    copy_source: Some(crate::markdown::selection::BlockSource {
+                        block_key: row.id.to_string(),
+                        part_key: part_key.to_string(),
+                        source: source.clone(),
+                        range: top.range.start.min(source.len())..top.range.end.min(source.len()),
+                    }),
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
-                };
                 let timer = frame_stats_enabled().then(Instant::now);
                 let el = render::render_block(
                     &top.block,
@@ -2950,7 +2989,7 @@ impl Transcript {
     }
 }
 
-/// A sent message's text with its file-mention chips. The same recipe as the
+/// A selectable sent message with its file-mention chips. The same recipe as the
 /// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
 /// the mono font at `code_text` violet, [`StyledText`] supplies wrapped glyph
 /// geometry through its layout handle, and a canvas paints the rounded
@@ -2961,13 +3000,10 @@ impl Transcript {
 /// gpui's line-layout cache (identical text + runs ⇒ reuse) and the underlay
 /// repaints O(chips) quads — no layout work, no re-projection (spans were
 /// computed once in [`rows_for_entry`]).
-/// The user bubble's text: runs split at mention-chip boundaries (one plain
-/// run when there are none), with the same selection machinery as rendered
-/// markdown — the element registers into the frame's document-ordered
-/// registry, so drags select, span into adjacent rows, and Cmd+C copies.
-fn user_bubble_text(
-    row_id: &SharedString,
+fn user_message_text(
+    row_key: &str,
     text: SharedString,
+    source: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
 ) -> AnyElement {
@@ -3004,9 +3040,26 @@ fn user_bubble_text(
     }
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
-    let wash = theme.code_wash;
-    let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
-    let sel_theme = theme.clone();
+    let chip_wash = theme.code_wash;
+    let selection_wash = render::selection_wash(theme);
+    let selection_key: std::sync::Arc<str> = format!("{row_key}:user").into();
+    let copy = crate::markdown::selection::CopyMeta {
+        block: crate::markdown::selection::BlockSource {
+            block_key: row_key.to_string(),
+            part_key: row_key.to_string(),
+            source: Arc::from(source.as_ref()),
+            range: 0..source.len(),
+        },
+        partial: crate::markdown::selection::PartialCopy::Projected(
+            mentions
+                .iter()
+                .map(|span| crate::markdown::selection::Projection {
+                    display: span.range.clone(),
+                    source: span.source_range.clone(),
+                })
+                .collect(),
+        ),
+    };
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -3015,14 +3068,32 @@ fn user_bubble_text(
                     window.paint_quad(quad(
                         rect,
                         px(5.0),
-                        wash,
+                        chip_wash,
                         px(0.0),
                         gpui::transparent_black(),
                         BorderStyle::default(),
                     ));
                 }
             }
-            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
+            if let Some(range) = crate::markdown::selection::wash_range(&selection_key) {
+                for rect in render::range_rects(&layout, &range, 0.0, 0.0) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(0.0),
+                        selection_wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+            render::register_selectable_text(
+                window,
+                selection_key.clone(),
+                text.clone(),
+                layout.clone(),
+                Some(copy.clone()),
+            );
         },
     )
     .absolute()
@@ -3886,12 +3957,16 @@ mod tests {
         let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::User {
-            text, attachments, ..
+            text,
+            source,
+            attachments,
+            ..
         } = &rows[0].kind
         else {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "what color is this?");
+        assert_eq!(source.as_ref(), "what color is this?");
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].path, "/data/uploads/ab12-red.png");
         assert_eq!(attachments[0].name, "ab12-red.png");
@@ -3922,7 +3997,13 @@ mod tests {
         entry.status = None;
         entry.parts = vec![text_part("t0", raw)];
         let rows = rows_for_entry(&entry, false, &mut parse);
-        let RowKind::User { text, mentions, .. } = &rows[0].kind else {
+        let RowKind::User {
+            text,
+            source,
+            mentions,
+            ..
+        } = &rows[0].kind
+        else {
             panic!("expected a user row");
         };
         assert!(
@@ -3930,6 +4011,7 @@ mod tests {
             "raw link left visible: {text}"
         );
         assert!(text.contains("composer.rs"));
+        assert_eq!(source.as_ref(), raw);
         assert_eq!(mentions.len(), 1);
         assert!(!mentions[0].is_dir);
         assert_eq!(mentions[0].path.as_ref(), "crates/ui/src/composer.rs");
