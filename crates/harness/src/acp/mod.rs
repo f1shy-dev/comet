@@ -591,6 +591,14 @@ impl AcpHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
+        if self.spec.id == HarnessId::ClaudeCode
+            && let Some(claude) = crate::claude::resolve_claude_executable()
+        {
+            // claude-agent-acp forwards this to the Agent SDK as
+            // pathToClaudeCodeExecutable. This preserves our KumiClaude-first
+            // resolution after the native Claude harness was retired.
+            cmd.env("CLAUDE_CODE_EXECUTABLE", claude);
+        }
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
@@ -967,6 +975,9 @@ impl Harness for AcpHarness {
         }
         if std::env::var_os(self.spec.env_override).is_some_and(|v| !v.is_empty()) {
             return true;
+        }
+        if self.spec.id == HarnessId::ClaudeCode {
+            return crate::claude::resolve_claude_executable().is_some();
         }
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
     }
