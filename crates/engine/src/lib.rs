@@ -15,6 +15,7 @@ use comet_sync::DocsStore;
 pub mod agent_accounts;
 pub mod auth;
 pub mod claude_history;
+pub mod codex_history;
 pub mod diff_sync;
 pub mod chat2_host;
 pub mod doc_host;
@@ -33,6 +34,7 @@ pub mod workspace_host;
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use claude_history::ClaudeHistory;
+pub use codex_history::CodexHistory;
 pub use diff_sync::{
     CheckoutDiffSync, DiffSidecar, DiffSnapshot, TurnSnapshot, capture_diff, capture_diff_against,
     capture_turn_diff, merge_base, snapshot_tree,
@@ -111,6 +113,8 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     /// Read-only view of this device's Claude Code JSONL archive.
     pub claude_history: ClaudeHistory,
+    /// Read-only view of this device's Codex rollout archive.
+    pub codex_history: CodexHistory,
     pub device_id: String,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -199,6 +203,7 @@ impl EngineCore {
         let uploads = Uploads::new(data_dir, edge.clone());
         let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
         let claude_history = ClaudeHistory::detect();
+        let codex_history = CodexHistory::detect();
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -223,6 +228,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             claude_history,
+            codex_history,
             device_id,
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -336,6 +342,7 @@ impl EngineCore {
             self.uploads.clone(),
             self.agent_accounts.clone(),
             self.claude_history.clone(),
+            self.codex_history.clone(),
         )
         .with_auth(self.auth());
         if let Some(links) = self.links() {

@@ -1827,14 +1827,42 @@ async fn run_session(session: Session) {
         let (session_id, session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
-            match request_draining(&client, &mut incoming, "session/load", load).await {
-                Ok(resp) => (resume.clone(), resp),
-                // A missing/foreign session falls back to a fresh one.
-                Err(e) => {
+            let loaded = match request_draining(
+                &client,
+                &mut incoming,
+                "session/load",
+                load.clone(),
+            )
+            .await
+            {
+                Ok(response) => Some(response),
+                Err(error) => {
                     tracing::debug!(
                         target: "comet_harness::acp",
-                        "session/load failed (starting fresh): {e}"
+                        "session/load failed: {error}"
                     );
+                    if harness == HarnessId::Codex
+                        && crate::codex::unarchive_thread(resume).await.is_ok()
+                    {
+                        match request_draining(&client, &mut incoming, "session/load", load).await {
+                            Ok(response) => Some(response),
+                            Err(retry_error) => {
+                                tracing::debug!(
+                                    target: "comet_harness::acp",
+                                    "session/load after Codex unarchive failed: {retry_error}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+            };
+            match loaded {
+                Some(response) => (resume.clone(), response),
+                None => {
+                    // A missing/foreign session falls back to a fresh one.
                     let new = request_draining(
                         &client,
                         &mut incoming,

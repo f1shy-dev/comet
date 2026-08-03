@@ -113,6 +113,10 @@ pub mod methods {
     // the selected device). An imported chat continues its source session.
     pub const LIST_CLAUDE_THREADS: &str = "ListClaudeThreads";
     pub const IMPORT_CLAUDE_THREAD: &str = "ImportClaudeThread";
+    // Codex rollout history (ControlRpc, relay-forwardable — files are local
+    // to the selected device). An imported chat resumes its source thread.
+    pub const LIST_CODEX_THREADS: &str = "ListCodexThreads";
+    pub const IMPORT_CODEX_THREAD: &str = "ImportCodexThread";
     // Updates (ControlRpc, relay-forwardable — a device reports/applies its own
     // binary's update). Stream: current UpdateStatus, then every change.
     pub const UPDATE_STATUS: &str = "UpdateStatus";

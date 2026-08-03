@@ -36,6 +36,7 @@ use crate::settings::appearance::AppearancePage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::claude_imports::{ClaudeImportsEvent, ClaudeImportsPage};
+use crate::settings::codex_imports::{CodexImportsEvent, CodexImportsPage};
 use crate::settings::devices::DevicesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
@@ -151,18 +152,20 @@ pub enum SettingsSection {
     Agents,
     Appearance,
     Notifications,
+    CodexImports,
     ClaudeImports,
     Shortcuts,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 8] = [
+    pub const ALL: [SettingsSection; 9] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
+        SettingsSection::CodexImports,
         SettingsSection::ClaudeImports,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
@@ -177,6 +180,7 @@ impl SettingsSection {
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
+            SettingsSection::CodexImports => "Codex history",
             SettingsSection::ClaudeImports => "Claude history",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
@@ -469,7 +473,9 @@ pub struct Shell {
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
+    codex_imports_page: Option<Entity<CodexImportsPage>>,
     claude_imports_page: Option<Entity<ClaudeImportsPage>>,
+    codex_imports_sub: Option<Subscription>,
     claude_imports_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
     chat_menu: popover::Popup<(String, Point<Pixels>)>,
@@ -647,6 +653,7 @@ impl Shell {
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
+            Some("settings/codex-history") => Route::Settings(SettingsSection::CodexImports),
             Some("settings/claude-history") | Some("settings/imports") => {
                 Route::Settings(SettingsSection::ClaudeImports)
             }
@@ -702,7 +709,9 @@ impl Shell {
             shortcuts_sub: None,
             notifications_sub: None,
             chat_menu: popover::Popup::default(),
+            codex_imports_page: None,
             claude_imports_page: None,
+            codex_imports_sub: None,
             claude_imports_sub: None,
             rename_dialog: None,
             delete_confirm: None,
@@ -1336,6 +1345,29 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::CodexImports => {
+                if self.codex_imports_page.is_none() {
+                    let state = self.state.clone();
+                    let page = cx.new(|cx| CodexImportsPage::new(state, cx));
+                    self.codex_imports_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &CodexImportsEvent, cx| {
+                            let CodexImportsEvent::OpenChat(chat_id) = event;
+                            let chat_id = chat_id.clone();
+                            this.route = Route::Chat;
+                            this.nav.push(NavEntry::Chat(chat_id.clone()));
+                            this.state
+                                .update(cx, |state, cx| state.select_chat(Some(chat_id), cx));
+                            cx.notify();
+                        },
+                    ));
+                    self.codex_imports_page = Some(page);
+                }
+                match &self.codex_imports_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::ClaudeImports => {
                 if self.claude_imports_page.is_none() {
                     let state = self.state.clone();
@@ -1957,6 +1989,7 @@ impl Shell {
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Notifications => icons::BELL,
+            SettingsSection::CodexImports => icons::DOCUMENT_ADD,
             SettingsSection::ClaudeImports => icons::DOCUMENT_ADD,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
