@@ -32,12 +32,12 @@ On macOS, this checkout has a one-command daily build:
 scripts/install-macos-local.sh
 ```
 
-It installs `/Applications/Zeron.app`, registers the background IPC engine
-against this checkout's `target/release/comet headless`, and opens the app.
-Re-run it after pulling or rebasing to rebuild both sides. Use `--no-daemon` or
-`--no-open` when you only want part of that flow. To build a launchable bundle
-without installing it, run `scripts/build-macos-app.sh`; the result is
-`target/package/Zeron.app`.
+It installs `/Applications/Zeron.app` and opens it. The desktop app embeds the
+engine and exposes local IPC while it is running; the installer deliberately
+does not create or manage a launch agent. Re-run it after pulling or rebasing
+to rebuild the app, or pass `--no-open` to leave it closed after installation.
+To build a launchable bundle without installing it, run
+`scripts/build-macos-app.sh`; the result is `target/package/Zeron.app`.
 
 ---
 
