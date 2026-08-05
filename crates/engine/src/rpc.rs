@@ -489,7 +489,6 @@ impl EngineRpc {
         // when an idempotent retry refreshes their transcript.
         let existing_space_id = self
             .workspace
-            .doc()
             .chat(&chat_id)
             .map_err(|error| RpcError::Failed(error.to_string()))?
             .and_then(|chat| chat.space_id);

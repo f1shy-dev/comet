@@ -127,7 +127,7 @@ async fn rpc_import_attaches_to_source_and_is_idempotent() {
         source_before
     );
 
-    let chat = core.workspace.doc().chat(&import.chat_id).unwrap().unwrap();
+    let chat = core.workspace.chat(&import.chat_id).unwrap().unwrap();
     assert_eq!(chat.harness_session_id.as_deref(), Some("session-fixture"));
     assert_eq!(chat.harness_session_cwd.as_deref(), Some("/fixture/work"));
     let first_entries = core
@@ -192,7 +192,6 @@ async fn rpc_import_groups_linked_worktree_under_main_repo_space() {
 
     let chat = core
         .workspace
-        .doc()
         .chat(&imported.chat_id)
         .unwrap()
         .unwrap();
@@ -203,7 +202,6 @@ async fn rpc_import_groups_linked_worktree_under_main_repo_space() {
     );
     let space = core
         .workspace
-        .doc()
         .space(chat.space_id.as_deref().unwrap())
         .unwrap()
         .unwrap();
@@ -239,7 +237,6 @@ async fn retry_does_not_regroup_an_existing_import() {
     .unwrap();
     let first_space = core
         .workspace
-        .doc()
         .space(&first.space_id)
         .unwrap()
         .unwrap();
@@ -260,7 +257,7 @@ async fn retry_does_not_regroup_an_existing_import() {
     .unwrap();
     assert_eq!(retry.chat_id, first.chat_id);
     assert_eq!(retry.space_id, first.space_id);
-    assert_eq!(core.workspace.doc().read_spaces().unwrap().len(), 1);
+    assert_eq!(core.workspace.read_spaces().unwrap().len(), 1);
     core.shutdown().await;
 }
 
@@ -328,7 +325,6 @@ async fn imports_copied_real_threads_without_source_mutation() {
         assert_eq!(before, imported.source_sha256);
         let chat = core
             .workspace
-            .doc()
             .chat(&imported.chat_id)
             .unwrap()
             .unwrap();

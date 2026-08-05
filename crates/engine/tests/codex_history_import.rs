@@ -151,7 +151,6 @@ async fn rpc_import_attaches_to_source_filters_internal_rows_and_is_idempotent()
 
     let chat = core
         .workspace
-        .doc()
         .chat(&imported.chat_id)
         .unwrap()
         .unwrap();
@@ -224,7 +223,6 @@ async fn rpc_import_groups_linked_worktree_under_main_repo_space() {
 
     let chat = core
         .workspace
-        .doc()
         .chat(&imported.chat_id)
         .unwrap()
         .unwrap();
@@ -235,7 +233,6 @@ async fn rpc_import_groups_linked_worktree_under_main_repo_space() {
     );
     let space = core
         .workspace
-        .doc()
         .space(chat.space_id.as_deref().unwrap())
         .unwrap()
         .unwrap();
@@ -313,7 +310,6 @@ async fn imports_copied_real_threads_without_source_mutation() {
         assert_eq!(before, imported.source_sha256);
         let chat = core
             .workspace
-            .doc()
             .chat(&imported.chat_id)
             .unwrap()
             .unwrap();
