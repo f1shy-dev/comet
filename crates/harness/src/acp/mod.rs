@@ -1993,11 +1993,15 @@ async fn run_session(session: Session) {
         res = setup => match res {
             Ok(v) => v,
             Err(e) => {
+                let error = match stderr_tail.snapshot() {
+                    Some(stderr) => format!("{e}: {stderr}"),
+                    None => e.to_string(),
+                };
                 let _ = event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
-                        error: Some(e.to_string()),
+                        error: Some(error),
                         session_id: None,
                     }))
                     .await;

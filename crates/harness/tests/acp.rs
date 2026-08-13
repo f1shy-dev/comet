@@ -93,6 +93,31 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
         .collect()
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn setup_failure_includes_adapter_stderr() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("failing-acp.sh");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nread -r _\necho 'adapter bootstrap exploded' >&2\nexit 23\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::grok().with_executable(executable);
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("never reaches a prompt"), controls).await;
+    let done = dones(&events);
+
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    let error = done[0].1.as_deref().unwrap_or_default();
+    assert!(error.contains("initialize: app-server exited before responding"));
+    assert!(error.contains("adapter bootstrap exploded"), "{error}");
+}
+
 #[tokio::test]
 async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
     let (controls, _steer, _token) = controls();
