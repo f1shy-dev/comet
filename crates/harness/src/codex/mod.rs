@@ -15,14 +15,18 @@ use tokio::process::Command;
 
 use crate::HarnessError;
 
-/// Locate the Codex CLI used behind `codex-acp`. Kept separate from adapter
-/// discovery because archived imported rollouts need one best-effort
-/// app-server unarchive before ACP retries `session/load`.
-fn resolve_codex_executable() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CODEX_EXECUTABLE")
-        && !path.is_empty()
+/// Locate the Codex CLI used behind `codex-acp`. `CODEX_PATH` is the adapter's
+/// native override; `CODEX_EXECUTABLE` remains our backwards-compatible app
+/// override. Kept separate from adapter discovery because archived imported
+/// rollouts need one best-effort app-server unarchive before ACP retries
+/// `session/load`.
+pub(crate) fn resolve_codex_executable() -> Option<PathBuf> {
+    let adapter_override = std::env::var_os("CODEX_PATH");
+    let legacy_override = std::env::var_os("CODEX_EXECUTABLE");
+    if let Some(path) =
+        codex_executable_override(adapter_override.as_deref(), legacy_override.as_deref())
     {
-        return Some(PathBuf::from(path));
+        return Some(path);
     }
     let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
     let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
@@ -53,6 +57,17 @@ fn resolve_codex_executable() -> Option<PathBuf> {
             .map(|directory| directory.join(exe)),
     );
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn codex_executable_override(
+    adapter_override: Option<&std::ffi::OsStr>,
+    legacy_override: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    [adapter_override, legacy_override]
+        .into_iter()
+        .flatten()
+        .find(|path| !path.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Restore an archived Codex rollout before the ACP adapter retries loading
@@ -110,4 +125,23 @@ async fn unarchive_thread_with(executable: &Path, thread_id: &str) -> Result<(),
         .map_err(|_| HarnessError::Protocol("codex thread unarchive timed out".into()))?;
     crate::shutdown_child(&mut child, Duration::from_millis(250)).await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_override_precedes_legacy_override() {
+        let adapter = std::ffi::OsStr::new("/adapter/codex");
+        let legacy = std::ffi::OsStr::new("/legacy/codex");
+        assert_eq!(
+            codex_executable_override(Some(adapter), Some(legacy)),
+            Some(PathBuf::from(adapter))
+        );
+        assert_eq!(
+            codex_executable_override(Some(std::ffi::OsStr::new("")), Some(legacy)),
+            Some(PathBuf::from(legacy))
+        );
+    }
 }

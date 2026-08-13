@@ -599,6 +599,15 @@ impl AcpHarness {
             // resolution after the native Claude harness was retired.
             cmd.env("CLAUDE_CODE_EXECUTABLE", claude);
         }
+        if self.spec.id == HarnessId::Codex
+            && let Some(codex) = crate::codex::resolve_codex_executable()
+        {
+            // codex-acp otherwise uses its bundled @openai/codex dependency,
+            // even though `installed()` already found the user's CLI. Keep
+            // discovery and execution on the same binary — especially for a
+            // Finder launch whose inherited PATH omits package-manager bins.
+            cmd.env("CODEX_PATH", codex);
+        }
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
